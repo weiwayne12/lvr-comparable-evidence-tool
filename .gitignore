@@ -1,0 +1,17 @@
+# 相依套件（首次執行由 npm install 安裝）
+node_modules/
+
+# 產出（含真實個案截圖與資料，不進版控）
+output/
+
+# 真實個案設定檔（個資，不上傳；請自行保存於本機）
+案件設定_*.json
+
+# Playwright / 暫存
+.playwright-cli/
+__pycache__/
+*.pyc
+
+# 系統
+.DS_Store
+Thumbs.db
