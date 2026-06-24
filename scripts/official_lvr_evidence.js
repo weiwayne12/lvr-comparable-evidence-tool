@@ -87,7 +87,7 @@ function writeCsv(filePath, rows) {
     fs.writeFileSync(filePath, "﻿", "utf8");
     return;
   }
-  const headers = Object.keys(rows[0]);
+  const headers = Object.keys(rows[0]).filter((h) => !h.startsWith("_"));
   const escape = (value) => {
     const text = value == null ? "" : String(value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -406,6 +406,107 @@ function totalFromSummary(summary) {
   return m ? Number(m[1]) : null;
 }
 
+// 回到第一頁（DataTables 首筆：data-dt-idx=0），座標點擊
+async function clickFirstPage(page, frame, beforeSig) {
+  const btns = frame.locator('.page-link[data-dt-idx="0"]');
+  const n = await btns.count();
+  if (!n) return false;
+  for (let i = 0; i < n; i++) {
+    const box = await btns.nth(i).boundingBox().catch(() => null);
+    if (!box || box.width <= 0) continue;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 120 });
+    for (let t = 0; t < 16; t++) {
+      await frame.waitForTimeout(250);
+      const rows = await extractRows(frame);
+      if (rows.length && rowSig(rows[0]) !== beforeSig) return true;
+    }
+  }
+  return false;
+}
+
+// 在可見結果表中找出某筆（門牌|交易日期 指紋），只把該列框紅並回傳是否找到
+async function highlightRow(frame, sig) {
+  return frame.evaluate((target) => {
+    const norm = (s) => String(s || "").replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\s/g, "");
+    const tables = [...document.querySelectorAll("table")].filter((t) => {
+      const r = t.getBoundingClientRect();
+      return r.width > 300 && r.height > 40 && (t.innerText || "").includes("地段位置或門牌") && (t.innerText || "").includes("交易日期");
+    }).sort((a, b) => b.querySelectorAll("tbody tr").length - a.querySelectorAll("tbody tr").length);
+    const t = tables[0];
+    if (!t) return false;
+    const heads = [...t.querySelectorAll("thead th, tr:first-child th")].map((x) => norm(x.innerText));
+    const addrIdx = heads.findIndex((h) => h.includes("門牌"));
+    const dateIdx = heads.findIndex((h) => h.includes("交易日期"));
+    let found = false;
+    for (const tr of t.querySelectorAll("tbody tr")) {
+      const tds = [...tr.querySelectorAll("td")];
+      const sig = norm(tds[addrIdx] ? tds[addrIdx].innerText : "") + "|" + norm(tds[dateIdx] ? tds[dateIdx].innerText : "");
+      if (!found && sig === target) {
+        tr.style.outline = "3px solid #d00";
+        tr.style.background = "#fff3f3";
+        found = true;
+      } else {
+        tr.style.outline = "";
+        tr.style.background = "";
+      }
+    }
+    return found;
+  }, sig);
+}
+
+// 本頁有哪些 targets（回傳其指紋清單）
+async function sigsOnPage(frame, sigs) {
+  return frame.evaluate((wanted) => {
+    const norm = (s) => String(s || "").replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\s/g, "");
+    const tables = [...document.querySelectorAll("table")].filter((t) => {
+      const r = t.getBoundingClientRect();
+      return r.width > 300 && r.height > 40 && (t.innerText || "").includes("地段位置或門牌") && (t.innerText || "").includes("交易日期");
+    }).sort((a, b) => b.querySelectorAll("tbody tr").length - a.querySelectorAll("tbody tr").length);
+    const t = tables[0];
+    if (!t) return [];
+    const heads = [...t.querySelectorAll("thead th, tr:first-child th")].map((x) => norm(x.innerText));
+    const addrIdx = heads.findIndex((h) => h.includes("門牌"));
+    const dateIdx = heads.findIndex((h) => h.includes("交易日期"));
+    const set = new Set(wanted);
+    const here = [];
+    for (const tr of t.querySelectorAll("tbody tr")) {
+      const tds = [...tr.querySelectorAll("td")];
+      const sig = norm(tds[addrIdx] ? tds[addrIdx].innerText : "") + "|" + norm(tds[dateIdx] ? tds[dateIdx].innerText : "");
+      if (set.has(sig)) here.push(sig);
+    }
+    return here;
+  }, sigs);
+}
+
+// 逐頁找出最接近的幾筆，各框紅截一張官方畫面
+async function captureComparables(page, frame, outDir, targets, onShot) {
+  const want = new Map(targets.map((t) => [t.match, t]));
+  const captured = [];
+  for (let pageNo = 1; pageNo <= 60 && want.size; pageNo++) {
+    const present = await sigsOnPage(frame, [...want.keys()]);
+    for (const sig of present) {
+      const t = want.get(sig);
+      if (!t) continue;
+      const ok = await highlightRow(frame, sig);
+      if (ok) {
+        const fn = `比較標的_排名${String(t.rank).padStart(2, "0")}.png`;
+        await page.screenshot({ path: path.join(outDir, fn), fullPage: false });
+        captured.push({ rank: t.rank, file: fn, addr: t.addr, date: t.date, price: t.price });
+        if (onShot) onShot(t.rank, t.addr);
+      }
+      want.delete(sig);
+    }
+    if (!want.size) break;
+    const rows = await extractRows(frame);
+    if (!rows.length) break;
+    if (!(await clickNextPage(page, frame, rowSig(rows[0])))) break;
+  }
+  await frame.evaluate(() => {
+    document.querySelectorAll("tbody tr").forEach((tr) => { tr.style.outline = ""; tr.style.background = ""; });
+  }).catch(() => {});
+  return captured.sort((a, b) => a.rank - b.rank);
+}
+
 // ─────────────── 接近度排序模組 ───────────────
 
 // 全形數字 → 半形
@@ -482,10 +583,16 @@ function parseAge(row) {
   return isFinite(n) ? n : null;
 }
 
-// 備註欄是否屬特殊/瑕疵交易（建議排除或審慎）
+// 備註欄是否屬特殊/瑕疵交易（關係人、急買急售等，單價代表性低，應排除或審慎）
 function isAbnormal(row) {
   const v = String(getField(row, "備註") || "");
-  return /親友|員工|共有人|特殊關係|關係人|瑕疵|民情風俗|急買|急售|債務|拍賣|增建.*交易/.test(v);
+  return /親友|員工|共有人|特殊關係|關係人|瑕疵|民情風俗|急買|急售|債務|拍賣/.test(v);
+}
+
+// 備註欄是否有增建（頂樓加蓋/夾層/增建），會墊高面積使單價灌水（陽台外推屬輕微，不計）
+function isInflated(row) {
+  const v = String(getField(row, "備註") || "");
+  return /頂樓加蓋|夾層|地下增建|其他增建|增建(?!.*交易)/.test(v);
 }
 
 // 門牌正規化後是否含關鍵字（去全形、去空白）
@@ -533,6 +640,8 @@ function rankComparables(rows, subject) {
     const totalFloors = parseTotalFloors(r);
     const age = parseAge(r);
     const abnormal = isAbnormal(r);
+    const inflated = isInflated(r);
+    const noPrice = unitPriceOf(r) == null; // 無單價（多為整棟/全棟交易），無法當單價基準
     const oneF = floor === 1;
     // 分層：同棟(0) → 同巷其他(1)
     const tier = sameAddr ? 0 : 1;
@@ -544,9 +653,9 @@ function rankComparables(rows, subject) {
     const timeKey = sueMonths != null && date ? Math.abs(date.months - sueMonths)
       : (date ? -date.num : Number.MAX_SAFE_INTEGER);
     const floorKey = subFloor != null && floor != null ? Math.abs(floor - subFloor) : 99;
-    // 異常/一樓給懲罰，排到同組後段（但仍保留供參）
-    const penalty = (abnormal ? 1 : 0) + (oneF ? 1 : 0);
-    return { r, sameAddr, date, floor, totalFloors, age, abnormal, oneF, tier, heightBucket, ageKey, timeKey, floorKey, penalty };
+    // 品質懲罰：無單價最重(3)、特殊交易與一樓(各2)、增建灌水(1)，排到同組後段（仍保留供參）
+    const penalty = (noPrice ? 3 : 0) + (abnormal ? 2 : 0) + (oneF ? 2 : 0) + (inflated ? 1 : 0);
+    return { r, sameAddr, date, floor, totalFloors, age, abnormal, inflated, noPrice, oneF, tier, heightBucket, ageKey, timeKey, floorKey, penalty };
   });
 
   // 同棟 → 同型態組(樓高) → 排除一樓/瑕疵 → 時間最近 → 樓層接近 → 屋齡接近
@@ -565,10 +674,12 @@ function rankComparables(rows, subject) {
     if (s.sameAddr) notes.push("同棟"); else notes.push("同巷");
     if (subTotalF != null && s.totalFloors != null && Math.abs(s.totalFloors - subTotalF) >= 5) notes.push("樓高差異大(型態可能不同)");
     if (s.oneF) notes.push("一樓");
+    if (s.noPrice) notes.push("無單價(全棟交易)");
+    if (s.inflated) notes.push("有增建(單價偏高)");
     if (s.abnormal) notes.push("特殊/瑕疵交易");
     return {
       "排名": i + 1,
-      "註記": notes.join("、"),
+      "註記": notes.join("、") || "乾淨可採",
       "交易日期": getField(s.r, "交易日期"),
       "單價": getField(s.r, "單價"),
       "樓別/樓高": getField(s.r, "樓別", "樓層"),
@@ -576,7 +687,9 @@ function rankComparables(rows, subject) {
       "屋齡": getField(s.r, "屋齡"),
       "地段位置或門牌": getField(s.r, "地段位置或門牌", "門牌"),
       "主要用途": getField(s.r, "主要用途"),
-      "備註": getField(s.r, "備註")
+      "備註": getField(s.r, "備註"),
+      // 截圖比對用：正規化門牌＋日期（不輸出到 CSV 也行，但留著供程式比對）
+      "_match": normalizeDigits(getField(s.r, "地段位置或門牌", "門牌")).replace(/\s/g, "") + "|" + normalizeDigits(getField(s.r, "交易日期"))
     };
   });
 }
@@ -684,6 +797,21 @@ async function main() {
       writeCsv(path.join(outDir, "最接近比較標的.csv"), ranked);
     }
 
+    // 對最接近的前 N 筆，各框紅截一張官方畫面（本階段核心產出）
+    let comparableShots = [];
+    const shotN = Number(cfg["截圖最接近筆數"] || 0);
+    if (ranked.length && shotN > 0 && fetchAll) {
+      const targets = ranked.slice(0, shotN).map((r) => ({
+        match: r._match, rank: r["排名"], addr: r["地段位置或門牌"],
+        date: r["交易日期"], price: r["單價"]
+      }));
+      console.log(`截取最接近 ${targets.length} 筆的官方畫面…`);
+      const cur = await extractRows(frame);
+      await clickFirstPage(page, frame, cur.length ? rowSig(cur[0]) : "");
+      comparableShots = await captureComparables(page, frame, outDir, targets,
+        (rank, addr) => console.log(`  排名 ${rank}：${addr}`));
+    }
+
     const conditionHash = await sha256(conditionShot);
     const resultHash = await sha256(resultShot);
     const top = ranked.slice(0, 5);
@@ -712,6 +840,11 @@ async function main() {
       "── 最接近比較標的（前 5）──",
       ...top.map((r) => `${r["排名"]}. [${r["註記"]}] ${r["交易日期"]}　單價 ${r["單價"]}　${r["樓別/樓高"]}　${r["地段位置或門牌"]}`),
       "",
+      ...(comparableShots.length ? [
+        "── 最接近比較標的官方截圖（各框紅一筆）──",
+        ...comparableShots.map((s) => `${s.file}　排名${s.rank}　${s.date}　單價${s.price}　${s.addr}`),
+        ""
+      ] : []),
       "產出檔案：",
       `001_官方查詢條件畫面.png SHA-256 ${conditionHash}`,
       `002_官方查詢結果第1頁.png SHA-256 ${resultHash}`,
@@ -719,6 +852,7 @@ async function main() {
       "官方查詢結果_全部.json",
       cfg["排除房地車"] ? "篩選後_排除房地車.csv（供單價分析）" : "",
       ranked.length ? "最接近比較標的.csv（依接近度排序）" : "",
+      ...comparableShots.map((s) => `${s.file}（排名${s.rank}比較標的官方畫面，已框紅）`),
       "",
       "提醒：截圖為官方網頁畫面，CSV/JSON 僅係依畫面表格擷取之輔助整理。排序僅供初步篩選，最終比較標的之取捨由法院認定。"
     ].filter((line) => line !== "").join("\r\n");
@@ -733,6 +867,10 @@ async function main() {
       console.log("");
       console.log("最接近比較標的（前 5）：");
       top.forEach((r) => console.log(`  ${r["排名"]}. [${r["註記"]}] ${r["交易日期"]} 單價${r["單價"]} ${r["樓別/樓高"]} ${r["地段位置或門牌"]}`));
+    }
+    if (comparableShots.length) {
+      console.log("");
+      console.log(`已截取 ${comparableShots.length} 張最接近比較標的官方畫面（檔名 比較標的_排名NN.png）`);
     }
   } finally {
     await browser.close();
