@@ -2,6 +2,73 @@
 
 這套工具的目的，是用官方「內政部不動產交易實價查詢服務網」像一般使用者一樣選條件、按搜尋，然後保留官方網頁截圖與擷取表格。截圖可作為主要依據，CSV/JSON 只作為輔助整理。
 
+GitHub 專案位置：<https://github.com/weiwayne12/lvr-comparable-evidence-tool>
+
+## 在新電腦上安裝（從 GitHub 取得）
+
+換一台電腦要使用時，照下面四步做。前兩個工具一台電腦只需各裝一次。
+
+### 步驟 1：先裝好 Node.js 與 Git（各只需一次）
+
+- Node.js：到 <https://nodejs.org> 下載 **LTS 版**安裝。
+- Git：到 <https://git-scm.com> 下載安裝。
+
+裝完打開 PowerShell（開始功能表搜尋「PowerShell」），輸入以下兩行確認，各自有出現版本號就成功：
+
+```powershell
+node -v
+git --version
+```
+
+### 步驟 2：把專案抓下來
+
+切換到你想存放的資料夾（例如「文件」），再 clone 專案：
+
+```powershell
+cd $HOME\Documents
+git clone https://github.com/weiwayne12/lvr-comparable-evidence-tool.git
+cd lvr-comparable-evidence-tool
+```
+
+### 步驟 3：安裝相依套件與瀏覽器
+
+```powershell
+npm install
+npx playwright install chromium
+```
+
+- `npm install`：裝回 `node_modules`（Playwright 等套件）。
+- `npx playwright install chromium`：裝 Playwright 要驅動的瀏覽器。**這步很重要也最常被忘記**，少了它會跑不動。
+
+這兩步都需要網路，第一次會跑比較久，屬正常。
+
+### 步驟 4：執行
+
+雙擊 `點我官方查詢截圖.bat`，或在 PowerShell 輸入：
+
+```powershell
+npm run evidence
+```
+
+### ⚠️ 重要：個案資料不會跟著 GitHub 一起過去
+
+為保護個資，`.gitignore` 已**刻意排除**下列內容，所以新電腦 clone 下來不會有它們：
+
+- `output/`：截圖與產出資料。
+- `案件設定_*.json`：含個資的真實個案設定檔。
+
+新電腦上只會有一份範本 `案件設定.json`。若要在新電腦繼續處理某個個案，請自行用 USB 或加密雲端把該 `案件設定_某案.json` 帶過去，**切勿**為了方便把它 commit 上 GitHub（這是公開 repo，會外洩個資）。
+
+### 之後要更新到最新版
+
+往後在這台電腦只要拉最新版即可，不必重新 clone：
+
+```powershell
+cd $HOME\Documents\lvr-comparable-evidence-tool
+git pull
+npm install   # 若這次更新有新增套件才需要，跑了也無妨
+```
+
 ## 使用方式
 
 1. 打開 `案件設定.json`，修改縣市、行政區、門牌/社區關鍵字、交易期間等條件。
