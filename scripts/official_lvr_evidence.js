@@ -14,7 +14,8 @@ const CITY_ALIASES = new Map([
 ]);
 
 // 首頁「交易標的」實際 DOM：name=ptype。房地為單一選項 value="1,2"（含純房地與房地車），
-// 首頁無法在查詢階段把「房地(車)」分出來，故「排除房地車」改於擷取後依結果表車位數濾除。
+// 首頁無法在查詢階段把「房地(車)」分出來；分析母體一律納入房地車（官方單價已不含車位），
+// 僅在 cfg["排除房地車"]=true 時「額外」多輸出一份排除版 CSV，不影響分析母體。
 const PTYPE_CHECKBOXES = {
   "房地": "#customCheck1", // value 1,2
   "土地": "#customCheck2", // value 3
@@ -300,15 +301,19 @@ async function clickSearch(page, frame) {
 }
 
 async function waitForResults(frame, timeoutMs) {
-  // 注意：結果表「表頭」永遠存在，不能只看表頭，否則資料還沒載入就會誤判為 0 筆。
-  // 必須等到：真的出現「含交易日期(民國 yyy/mm/dd)的資料列」，或明確的「查無/0 筆」訊息。
-  await frame.waitForFunction(() => {
-    const text = document.body.innerText || "";
-    const empty = /查無|無符合|沒有.*資料|查詢結果\s*[：:]?\s*0\s*筆|顯示\s*0\s*筆/.test(text);
-    const hasDataRow = [...document.querySelectorAll("table tbody tr")]
-      .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""));
-    return hasDataRow || empty;
-  }, null, { timeout: timeoutMs || 30000 });
+  // 官方查詢本身要約 8~16 秒才載入，且「載入期間」頁面會短暫顯示「0 筆／無資料」，
+  // 結果表「表頭」又恆在 —— 因此任何「短時間內看到空或表頭」的判斷都會誤判成 0 筆
+  // （間歇性 bug 來源）。唯一可靠訊號是：真的出現「含交易日期(民國 yyy/mm/dd)的資料列」。
+  // 故改為輪詢等待，直到出現資料列才返回；若真的查無，則等到逾時，交由後續視為 0 筆。
+  const deadline = Date.now() + (timeoutMs || 30000);
+  while (Date.now() < deadline) {
+    const hasDataRow = await frame.evaluate(() =>
+      [...document.querySelectorAll("table tbody tr")]
+        .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""))
+    ).catch(() => false);
+    if (hasDataRow) return;
+    await frame.waitForTimeout(500);
+  }
 }
 
 async function extractRows(frame) {
@@ -757,12 +762,31 @@ async function main() {
     const conditionShot = path.join(outDir, "001_官方查詢條件畫面.png");
     await screenshotConditions(page, frame, conditionShot);
 
-    await clickSearch(page, frame);
-    await page.waitForTimeout(Number(cfg["查詢後等待毫秒"] || 8000));
-    await waitForResults(frame, 30000).catch(async (err) => {
+    // 送出查詢。官方查詢偶發載入失敗（尤其短時間重複查詢遭節流）會回 0 筆，
+    // 故「非明確查無」時自動重送，最多 3 次。
+    const hasData = () => frame.evaluate(() =>
+      [...document.querySelectorAll("table tbody tr")]
+        .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""))).catch(() => false);
+    const isExplicitEmpty = () => frame.evaluate(() => {
+      const emptyRow = [...document.querySelectorAll("table tbody tr")].some((tr) => /無資料|查無符合/.test(tr.innerText || ""));
+      const zero = /查詢結果\s*[：:]?\s*0\s*筆|顯示\s*0\s*筆/.test(document.body.innerText || "");
+      return emptyRow && zero;
+    }).catch(() => false);
+
+    let searchOk = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await clickSearch(page, frame);
+      await page.waitForTimeout(Number(cfg["查詢後等待毫秒"] || 8000));
+      await waitForResults(frame, 30000).catch(() => {});
+      if (await hasData() || await isExplicitEmpty()) { searchOk = true; break; }
+      if (attempt < 3) {
+        console.log(`查詢回 0 筆，重試（第 ${attempt + 1} 次）…`);
+        await page.waitForTimeout(2000);
+      }
+    }
+    if (!searchOk) {
       await page.screenshot({ path: path.join(outDir, "搜尋後未出結果畫面.png"), fullPage: false });
-      throw err;
-    });
+    }
 
     const resultShot = path.join(outDir, "002_官方查詢結果第1頁.png");
     await page.screenshot({ path: resultShot, fullPage: false });
@@ -791,12 +815,11 @@ async function main() {
     writeCsv(csvPath, rows);
     fs.writeFileSync(jsonPath, JSON.stringify(rows, null, 2), "utf8");
 
-    // 排除房地車後的篩選版（供單價分析用）
-    let excludeCount = 0;
+    // 含車位筆數（僅供顯示；分析母體一律納入房地車，官方單價已不含車位）。
+    const carCount = rows.filter((r) => carCountOf(r) >= 1).length;
+    // 選用：另外「多」輸出一份排除房地車版 CSV，不影響分析母體，僅供需要時參考。
     if (cfg["排除房地車"]) {
-      const filtered = rows.filter((r) => carCountOf(r) === 0);
-      excludeCount = rows.length - filtered.length;
-      writeCsv(path.join(outDir, "篩選後_排除房地車.csv"), filtered);
+      writeCsv(path.join(outDir, "篩選後_排除房地車.csv"), rows.filter((r) => carCountOf(r) === 0));
     }
 
     // 接近度排序：最接近系爭房屋的比較標的
@@ -840,13 +863,13 @@ async function main() {
       `交易標的：${(cfg["交易標的"] || []).join("、")}`,
       `官方頁面摘要：${summary}`,
       `擷取表格列數：${rows.length}${total ? "／官方共 " + total + " 筆" : ""}${fetchAll ? "（已逐頁擷取全部）" : "（僅第1頁）"}`,
-      cfg["排除房地車"] ? `其中含車位(房地車)：${excludeCount} 筆，排除後 ${rows.length - excludeCount} 筆` : "",
+      `其中含車位(房地車)：${carCount} 筆（已納入分析母體，官方單價已不含車位）`,
       "",
       "── 系爭房屋 ──",
       `門牌關鍵字：${subject["門牌關鍵字"] || "（未設定）"}`,
       `樓層：${subject["樓層"] != null ? subject["樓層"] : "（未設定）"}　起訴年月：${subject["起訴年月"] || "（未設定，暫以最近交易排序）"}`,
       "",
-      "── 門牌彙總（排除房地車後，依筆數）──",
+      "── 門牌彙總（納入房地車，依筆數）──",
       ...buildingSummary.map(([k, n]) => `${k}：${n} 筆`),
       "",
       "── 最接近比較標的（前 5）──",
@@ -862,7 +885,7 @@ async function main() {
       `002_官方查詢結果第1頁.png SHA-256 ${resultHash}`,
       "官方查詢結果_全部.csv（與官方畫面一致）",
       "官方查詢結果_全部.json",
-      cfg["排除房地車"] ? "篩選後_排除房地車.csv（供單價分析）" : "",
+      cfg["排除房地車"] ? "篩選後_排除房地車.csv（選用，另存之排除房地車版，不影響上述分析母體）" : "",
       ranked.length ? "最接近比較標的.csv（依接近度排序）" : "",
       ...comparableShots.map((s) => `${s.file}（排名${s.rank}比較標的官方畫面，已框紅）`),
       "",
@@ -874,7 +897,7 @@ async function main() {
     console.log(outDir);
     console.log("");
     console.log(summary || `擷取表格列數：${rows.length}`);
-    console.log(`實際擷取 ${rows.length} 筆${cfg["排除房地車"] ? `，含車位 ${excludeCount} 筆已排除` : ""}`);
+    console.log(`實際擷取 ${rows.length} 筆（含車位 ${carCount} 筆，已納入分析母體）`);
     if (ranked.length) {
       console.log("");
       console.log("最接近比較標的（前 5）：");
