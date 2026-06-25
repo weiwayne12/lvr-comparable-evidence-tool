@@ -785,7 +785,10 @@ async function main() {
       }
     }
     if (!searchOk) {
+      // 三次仍未偵測到資料列、也非「明確查無」——視為查詢未成功載入（而非 0 筆）。
+      // 法律佐證不得把載入失敗包裝成「官方查詢結果 0 筆」，故直接中止、不產出任何結果檔。
       await page.screenshot({ path: path.join(outDir, "搜尋後未出結果畫面.png"), fullPage: false });
+      throw new Error("查詢未成功載入結果，已保存搜尋後未出結果畫面.png；請重試或人工確認官方頁面。");
     }
 
     const resultShot = path.join(outDir, "002_官方查詢結果第1頁.png");
