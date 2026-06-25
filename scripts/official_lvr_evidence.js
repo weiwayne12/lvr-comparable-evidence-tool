@@ -300,12 +300,14 @@ async function clickSearch(page, frame) {
 }
 
 async function waitForResults(frame, timeoutMs) {
-  // 有資料 → 出現表頭；無資料 → 出現查無訊息。兩者皆視為查詢完成。
+  // 注意：結果表「表頭」永遠存在，不能只看表頭，否則資料還沒載入就會誤判為 0 筆。
+  // 必須等到：真的出現「含交易日期(民國 yyy/mm/dd)的資料列」，或明確的「查無/0 筆」訊息。
   await frame.waitForFunction(() => {
     const text = document.body.innerText || "";
-    const hasTable = text.includes("地段位置或門牌");
-    const empty = /查無|無符合|沒有.*資料|查詢結果：?\s*0\s*筆/.test(text);
-    return hasTable || empty;
+    const empty = /查無|無符合|沒有.*資料|查詢結果\s*[：:]?\s*0\s*筆|顯示\s*0\s*筆/.test(text);
+    const hasDataRow = [...document.querySelectorAll("table tbody tr")]
+      .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""));
+    return hasDataRow || empty;
   }, null, { timeout: timeoutMs || 30000 });
 }
 
@@ -625,16 +627,22 @@ function parseSueMonths(s) {
 // 主排序：產出「最接近比較標的」清單
 function rankComparables(rows, subject) {
   const kw = subject["門牌關鍵字"] || "";
+  // 本巷（如「161巷」）：同巷優先於鄰巷。同社區/同路段之單價水準較一致，比較性高於鄰巷他社區。
+  const laneM = normalizeDigits(kw).match(/(\d+巷)/);
+  const subLane = laneM ? laneM[1] : "";
   const sueMonths = parseSueMonths(subject["起訴年月"]);
   const subFloor = subject["樓層"] != null ? Number(subject["樓層"]) : null;
   const subTotal = subject["建物總樓層"] != null ? Number(subject["建物總樓層"]) : null;
   const subAge = subject["屋齡"] != null ? Number(subject["屋齡"]) : null;
 
-  // 排除房地車後的母體
-  const pool = rows.filter((r) => carCountOf(r) === 0);
+  // 母體：納入房地車。實測官方資料中，房地車成交之「總價／總面積／單價」皆為房地部分
+  // （車位價、車位面積已另計於「車位總價」欄），故含車位成交之單價與純房地一致、可直接比較。
+  // 排除房地車會白白丟掉大半市場（大直一帶七成成交含車位），故預設全部納入。
+  const pool = rows.slice();
 
   const scored = pool.map((r) => {
     const sameAddr = addrMatches(r, kw);
+    const sameLane = subLane ? normalizeDigits(getField(r, "地段位置或門牌", "門牌")).replace(/\s/g, "").includes(subLane) : false;
     const date = parseRocDate(r);
     const floor = parseFloor(r);
     const totalFloors = parseTotalFloors(r);
@@ -643,8 +651,8 @@ function rankComparables(rows, subject) {
     const inflated = isInflated(r);
     const noPrice = unitPriceOf(r) == null; // 無單價（多為整棟/全棟交易），無法當單價基準
     const oneF = floor === 1;
-    // 分層：同棟(0) → 同巷其他(1)
-    const tier = sameAddr ? 0 : 1;
+    // 分層：同棟(0) → 同巷本巷(1) → 鄰近其他(2)
+    const tier = sameAddr ? 0 : (sameLane ? 1 : 2);
     // 建物型態分組：以總樓層差分粗組（最能分辨老公寓/新大樓）。同組內不再細較樓層差。
     const hDiff = subTotal != null && totalFloors != null ? Math.abs(totalFloors - subTotal) : 0;
     const heightBucket = hDiff <= 2 ? 0 : (hDiff <= 6 ? 1 : 2);
@@ -655,7 +663,7 @@ function rankComparables(rows, subject) {
     const floorKey = subFloor != null && floor != null ? Math.abs(floor - subFloor) : 99;
     // 品質懲罰：無單價最重(3)、特殊交易與一樓(各2)、增建灌水(1)，排到同組後段（仍保留供參）
     const penalty = (noPrice ? 3 : 0) + (abnormal ? 2 : 0) + (oneF ? 2 : 0) + (inflated ? 1 : 0);
-    return { r, sameAddr, date, floor, totalFloors, age, abnormal, inflated, noPrice, oneF, tier, heightBucket, ageKey, timeKey, floorKey, penalty };
+    return { r, sameAddr, sameLane, date, floor, totalFloors, age, abnormal, inflated, noPrice, oneF, tier, heightBucket, ageKey, timeKey, floorKey, penalty };
   });
 
   // 同棟 → 同型態組(樓高) → 排除一樓/瑕疵 → 時間最近 → 樓層接近 → 屋齡接近
@@ -671,7 +679,8 @@ function rankComparables(rows, subject) {
   const subTotalF = subject["建物總樓層"] != null ? Number(subject["建物總樓層"]) : null;
   return scored.map((s, i) => {
     const notes = [];
-    if (s.sameAddr) notes.push("同棟"); else notes.push("同巷");
+    if (s.sameAddr) notes.push("同棟"); else if (s.sameLane) notes.push("同巷(本巷)"); else notes.push("鄰近");
+    if (carCountOf(s.r) >= 1) notes.push("含車位(單價已不含車位)");
     if (subTotalF != null && s.totalFloors != null && Math.abs(s.totalFloors - subTotalF) >= 5) notes.push("樓高差異大(型態可能不同)");
     if (s.oneF) notes.push("一樓");
     if (s.noPrice) notes.push("無單價(全棟交易)");
@@ -697,7 +706,7 @@ function rankComparables(rows, subject) {
 // 依門牌彙總（同棟各幾筆），供判斷哪些門牌屬同社區
 function summarizeByBuilding(rows) {
   const map = new Map();
-  for (const r of rows.filter((x) => carCountOf(x) === 0)) {
+  for (const r of rows) {
     const k = buildingKey(r);
     map.set(k, (map.get(k) || 0) + 1);
   }
