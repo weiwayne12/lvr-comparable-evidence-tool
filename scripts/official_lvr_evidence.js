@@ -719,13 +719,16 @@ async function sha256(filePath) {
 
 async function main() {
   const cfg = readJson(configPath);
+  // 完成後是否保留官方查詢視窗（讓使用者直接於瀏覽器檢視，不自動關閉）。
+  // 開啟此選項時一律以有畫面模式啟動，否則保留視窗無意義。
+  const keepOpen = !!cfg["完成後保留視窗"];
   const runId = `${timestamp()}_${safeName(cfg["案件名稱"])}`;
   const outputRoot = path.resolve(ROOT, cfg["輸出資料夾"] || "output/evidence");
   const outDir = path.join(outputRoot, runId);
   ensureDir(outDir);
 
   const browser = await chromium.launch({
-    headless: !cfg["顯示瀏覽器"],
+    headless: keepOpen ? false : !cfg["顯示瀏覽器"],
     slowMo: Number(cfg["慢速操作毫秒"] || 0)
   });
 
@@ -872,8 +875,22 @@ async function main() {
       console.log("");
       console.log(`已截取 ${comparableShots.length} 張最接近比較標的官方畫面（檔名 比較標的_排名NN.png）`);
     }
+
+    if (keepOpen) {
+      // 回到結果第 1 頁，讓畫面停在乾淨的官方查詢結果供直接檢視
+      const cur = await extractRows(frame);
+      await clickFirstPage(page, frame, cur.length ? rowSig(cur[0]) : "").catch(() => {});
+      console.log("");
+      console.log("已保留官方查詢視窗：可直接在瀏覽器檢視、捲動、點選結果。");
+      console.log("檢視完畢請自行關閉該視窗，程式即會結束。");
+      // 等使用者關閉視窗才結束（page 關閉或 browser 斷線皆視為結束）
+      await Promise.race([
+        page.waitForEvent("close", { timeout: 0 }).catch(() => {}),
+        new Promise((resolve) => browser.on("disconnected", resolve))
+      ]);
+    }
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
 }
 
