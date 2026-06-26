@@ -128,7 +128,7 @@ function parseCsv(text) {
   const headers = parseCsvLine(lines[0]);
   // 第二列可能是英文欄位名（若首格為 "the villages..." 之類），跳過
   let start = 1;
-  if (lines.length > 2 && /^[a-z_]/.test(parseCsvLine(lines[1])[0])) {
+  if (lines.length > 2 && /^[a-z_]/i.test(parseCsvLine(lines[1])[0])) {
     start = 2;
   }
   const rows = [];
@@ -221,7 +221,10 @@ export async function previewComparables(opts) {
   }
   function formatISO(date) {
     if (!date || isNaN(date.getTime())) return null;
-    return date.toISOString().slice(0, 10);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
   }
   const dataCoverage = {
     earliestTradeDate: earliestDate
@@ -240,8 +243,9 @@ export async function previewComparables(opts) {
   if (行政區) {
     const dist = 行政區.trim();
     filtered = filtered.filter((r) => {
-      const addr = r["土地位置建物門牌"] || r["鄉鎮市區"] || "";
-      return addr.includes(dist);
+      const district = r["鄉鎮市區"] || "";
+      const addr = r["土地位置建物門牌"] || "";
+      return district.includes(dist) || addr.includes(dist);
     });
   }
 
