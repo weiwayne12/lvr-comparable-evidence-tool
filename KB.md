@@ -24,11 +24,13 @@
 - 驗證工具是否可執行時，使用 `npm run evidence`。
 - `排除房地車` 預設為 `false`（納入房地車，理由見下方標準作法）。
 
-## MCP 工作流（v1）
+## MCP 工作流
 
-本專案提供 MCP server（`mcp/lvr-mcp-server.mjs`），讓 AI 助理可直接觸發官方查詢截圖流程。
+本專案提供 MCP server（`mcp/lvr-mcp-server.mjs`），讓 AI 助理可直接觸發官方查詢截圖流程與 Open Data 預覽。
 
 ### 工具清單
+
+#### v1 — 官網截圖流程
 
 | 工具 | 用途 |
 | --- | --- |
@@ -36,11 +38,23 @@
 | `list_evidence_runs()` | 列出歷次輸出資料夾，標示「完成／執行中／查詢未成功」 |
 | `read_evidence_summary(runId)` | 讀取某次查詢的結果摘要（操作紀錄、SHA-256、最接近比較標的） |
 
-### 典型流程
+#### v2 — Open Data 預覽（不打官網）
 
-1. AI 或人工備好 `案件設定_某案.json`。
-2. 呼叫 `run_official_capture` → 取得 runId。
-3. 過一會兒呼叫 `read_evidence_summary` 查進度；出現「完成」即可看摘要與截圖。
+| 工具 | 用途 |
+| --- | --- |
+| `refresh_lvr_open_data()` | 從內政部 Open Data 下載最新整批買賣 CSV ZIP 至 `cache/open-data/`，記錄 SHA-256 |
+| `preview_comparables(...)` | 從本機快取 CSV 篩選比較標的，回傳筆數、前幾筆、門牌彙總（不打官網） |
+
+### 典型流程（v2 完整流程）
+
+1. 呼叫 `refresh_lvr_open_data` 下載或更新 Open Data 快取（僅需偶爾更新）。
+2. 呼叫 `preview_comparables` 帶入縣市、行政區、門牌關鍵字等條件，預覽篩選。
+3. AI 與使用者討論條件、調整篩選。
+4. 條件定稿後，AI 或人工備好 `案件設定_某案.json`。
+5. 呼叫 `run_official_capture` 正式進官網截圖**（只打一次）**。
+6. 用 `read_evidence_summary` 查結果。
+
+> ⚠️ 預覽結果與官網查詢不會逐筆完全相同（資料更新時點不同），預覽僅供「篩選與討論」，最終佐證以官網截圖為準。
 
 ### MCP 安全設計（勿繞過）
 
@@ -48,17 +62,13 @@
 - **不污染 stdout**：MCP server 本身不 `console.log`（會破壞 JSON-RPC）；子程序輸出全導向各 run 資料夾的 `_執行log.txt`。
 - **fire-and-return**：`run_official_capture` 注入 `LVR_RUN_ID` 後在背景啟動子程序，立刻回傳 runId，不同步等查詢跑完。「狀態」就是 `output/evidence/<runId>/` 資料夾本身，不另設 job queue。
 - **官網只打一次**：官網對短時間重複查詢會節流，MCP 流程設計為「條件定稿後，只對官網正式跑一次」。
+- **preview 不打官網**：`preview_comparables` 僅讀本地快取的 Open Data CSV，不連官方查詢網站。
 
 ### 連接方式
 
 - Claude Code：專案根目錄已附 `.mcp.json`（內含本機絕對路徑，不入版控）。
 - 其他 MCP client：以 STDIO 啟動 `node mcp/lvr-mcp-server.mjs`（或 `npm run mcp`）。
 - `.mcp.json` 內為本機絕對路徑，換機器需自行調整。
-
-### v2 預定方向（尚未實作）
-
-- `preview_comparables`：用內政部 Open Data（無反爬蟲的整批 CSV）讓 AI 先預覽、篩選、討論條件，定稿後才進官網正式截圖一次。
-- 預覽結果與官網查詢不會逐筆完全相同（資料更新時點不同），預覽僅供「篩選與討論」，最終佐證以官網截圖為準。
 
 ## 標的價額分析標準作法（核心方法）
 
@@ -81,5 +91,5 @@
 ## 修改與驗證
 
 - 修改查詢、自動化、截圖、輸出格式相關程式後，應盡可能實際執行 `npm run evidence` 驗證。
-- 修改 MCP server 後，至少用 JSON-RPC handshake 確認三個 tool 正常註冊且 stdout 無污染。
+- 修改 MCP server 後，至少用 JSON-RPC handshake 確認五個 tool 正常註冊且 stdout 無污染。
 - 不要任意改動既有輸出檔名、欄位、資料夾結構，除非使用者明確要求。

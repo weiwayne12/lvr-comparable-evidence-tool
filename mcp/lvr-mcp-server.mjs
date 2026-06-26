@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// 內政部實價登錄佐證工具 — MCP server（v1，MCP-safe / fire-and-return）
+// 內政部實價登錄佐證工具 — MCP server（v1 + v2）
+//
+// v1：官網截圖流程（run_official_capture / list_evidence_runs / read_evidence_summary）
+// v2：Open Data 預覽（refresh_lvr_open_data / preview_comparables）
 //
 // 設計重點：
 //   1. STDIO server 不可把任何訊息寫到 stdout（會破壞 JSON-RPC）；本檔自身一律不 console.log，
@@ -7,6 +10,7 @@
 //   2. 強制 headless、不保留視窗（LVR_HEADLESS_FORCE=1），避免 tool call 等人工關窗而卡死。
 //   3. fire-and-return：run_official_capture 立刻回傳 runId 後即返回，不同步等查詢跑完；
 //      「狀態」就是 output/evidence/<runId>/ 這個資料夾本身，由 read_evidence_summary 判讀，不另設 job queue。
+//   4. preview 階段不打官網，僅使用本地快取的內政部 Open Data CSV。
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -16,6 +20,7 @@ import { readFile, readdir, stat, mkdir } from "node:fs/promises";
 import { openSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { refreshOpenData, readMeta, previewComparables } from "./open-data.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -43,7 +48,7 @@ function textResult(text, isError = false) {
   return { isError, content: [{ type: "text", text }] };
 }
 
-const server = new McpServer({ name: "taiwan-lvr-evidence", version: "0.1.0" });
+const server = new McpServer({ name: "taiwan-lvr-evidence", version: "0.2.0" });
 
 server.registerTool(
   "run_official_capture",
@@ -163,6 +168,75 @@ server.registerTool(
         tail || "（尚無輸出）"
       ].join("\n")
     );
+  }
+);
+
+// ─── v2 工具：Open Data 預覽 ───
+
+server.registerTool(
+  "refresh_lvr_open_data",
+  {
+    title: "下載／更新內政部 Open Data",
+    description:
+      "從內政部不動產交易實價查詢服務 Open Data 下載最新整批買賣 CSV（lvr_landcsv.zip），" +
+      "解壓至本機快取（cache/open-data/），記錄下載時間與 SHA-256。" +
+      "此步驟不打官網，僅下載公開 ZIP 檔。下載後即可用 preview_comparables 預覽篩選。",
+    inputSchema: {}
+  },
+  async () => {
+    try {
+      const meta = await refreshOpenData();
+      return textResult(
+        [
+          "Open Data 下載完成。",
+          `下載時間：${meta.downloadedAt}`,
+          `來源：${meta.sourceUrl}`,
+          `SHA-256：${meta.sha256}`,
+          `ZIP 大小：${(meta.zipSizeBytes / 1024 / 1024).toFixed(1)} MB`,
+          "",
+          "快取位置：cache/open-data/csv/（各縣市 *_lvr_land_a.csv）",
+          "現在可以用 preview_comparables 預覽篩選比較標的。",
+        ].join("\n")
+      );
+    } catch (err) {
+      return textResult(`下載失敗：${err.message}`, true);
+    }
+  }
+);
+
+server.registerTool(
+  "preview_comparables",
+  {
+    title: "預覽比較標的（Open Data）",
+    description:
+      "從本機快取的內政部 Open Data CSV 篩選比較標的（不打官網）。" +
+      "輸入縣市、行政區、門牌關鍵字、交易期間等條件，回傳符合條件的筆數、前幾筆資料、門牌彙總。" +
+      "⚠️ 此為 Open Data 預覽，僅供篩選與討論，最終仍須以 run_official_capture 產出的官網截圖佐證。" +
+      "使用前須先呼叫 refresh_lvr_open_data 下載快取。",
+    inputSchema: {
+      縣市: z.string().describe("縣市名稱，例如「臺北市」「臺中市」（台→臺會自動轉換）"),
+      行政區: z.string().optional().describe("行政區，例如「中山區」「南區」"),
+      門牌關鍵字: z.string().optional().describe("門牌地址關鍵字，例如「民生東路三段」「高工路」"),
+      交易期間: z.object({
+        起年: z.number().describe("民國年（起），例如 113"),
+        起月: z.number().optional().describe("月份（起），1-12，預設 1"),
+        迄年: z.number().describe("民國年（迄），例如 114"),
+        迄月: z.number().optional().describe("月份（迄），1-12，預設 12"),
+      }).optional().describe("交易期間（民國年月）"),
+      交易標的: z.array(z.string()).optional().describe("交易標的篩選，例如 [\"房地(含車位)\", \"房地\"]；留空不篩"),
+      排除房地車: z.boolean().optional().describe("是否排除含車位交易（預設 false，不排除）"),
+      建物型態: z.array(z.string()).optional().describe("建物型態篩選，例如 [\"住宅大樓\", \"華廈\"]；留空不篩"),
+      maxResults: z.number().optional().describe("最多回傳幾筆（預設 100）"),
+    }
+  },
+  async (params) => {
+    try {
+      const result = await previewComparables(params);
+      if (result.error) return textResult(result.error, true);
+      return textResult(JSON.stringify(result, null, 2));
+    } catch (err) {
+      return textResult(`預覽失敗：${err.message}`, true);
+    }
   }
 );
 

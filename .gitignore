@@ -4,6 +4,9 @@ node_modules/
 # 產出（含真實個案截圖與資料，不進版控）
 output/
 
+# Open Data 快取（ZIP + CSV，檔案大，不進版控）
+cache/
+
 # 真實個案設定檔（個資，不上傳；請自行保存於本機）
 案件設定_*.json
 
