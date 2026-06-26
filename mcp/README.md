@@ -30,7 +30,7 @@
 | 工具 | 用途 |
 | --- | --- |
 | `refresh_lvr_open_data()` | 從內政部 Open Data 下載最新整批買賣 CSV ZIP，解壓至 `cache/open-data/`，記錄 SHA-256 |
-| `preview_comparables(...)` | 從本機快取 CSV 篩選比較標的（不打官網），回傳筆數、前幾筆、門牌彙總 |
+| `preview_comparables(...)` | 從本機快取 CSV 篩選比較標的（不打官網），回傳筆數、前幾筆、門牌彙總、**資料涵蓋期間** |
 
 ## 典型流程（v2）
 
@@ -75,6 +75,19 @@
 ```
 
 也可用 `npm run mcp` 直接以 STDIO 啟動 server（供除錯）。
+
+## 路徑安全
+
+- `run_official_capture(configFile)`：僅接受專案根目錄內符合 `案件設定*.json` 的檔名，不允許 `..`、絕對路徑。
+- `read_evidence_summary(runId)`：僅接受單一資料夾名稱，不允許斜線、反斜線、`..`，解析後必須位於 `output/evidence/` 內。
+
+## Open Data 預覽限制（重要）
+
+- `preview_comparables` 是 Open Data 預覽，**不是正式證據**。
+- Open Data 快取可能只涵蓋特定期別（通常為最新一季），**不一定等於完整歷史資料**。
+- 回傳 JSON 的 `dataCoverage` 欄位標示快取涵蓋的交易日期範圍（含民國與西元格式）。
+- 查詢期間超出快取涵蓋期間時，回傳 `warnings` 提醒；查無資料**不能直接解讀為「官方無交易」**。
+- 最終佐證仍以 `run_official_capture` 產出的**官網截圖與操作紀錄**為準。
 
 ## 已知限制
 

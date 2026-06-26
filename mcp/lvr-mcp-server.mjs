@@ -66,7 +66,21 @@ server.registerTool(
     }
   },
   async ({ configFile }) => {
+    const baseName = path.basename(configFile);
+    if (
+      configFile.includes("..") ||
+      path.isAbsolute(configFile) ||
+      !/^案件設定.*\.json$/i.test(baseName)
+    ) {
+      return textResult(
+        `設定檔名不合法：「${configFile}」。僅允許專案根目錄內符合「案件設定*.json」的檔案，不可含 .. 或絕對路徑。`,
+        true
+      );
+    }
     const configPath = path.resolve(ROOT, configFile);
+    if (!configPath.startsWith(ROOT + path.sep) && configPath !== ROOT) {
+      return textResult(`設定檔路徑跳脫專案根目錄，已拒絕：${configPath}`, true);
+    }
     let caseName = "";
     try {
       const cfg = JSON.parse(await readFile(configPath, "utf8"));
@@ -144,7 +158,22 @@ server.registerTool(
     }
   },
   async ({ runId }) => {
+    if (
+      !runId ||
+      /[/\\]/.test(runId) ||
+      runId.includes("..") ||
+      path.isAbsolute(runId)
+    ) {
+      return textResult(
+        `runId 不合法：「${runId}」。僅允許單一資料夾名稱，不可含斜線、反斜線、.. 或絕對路徑。`,
+        true
+      );
+    }
     const dir = path.join(EVIDENCE_ROOT, runId);
+    const resolved = path.resolve(dir);
+    if (!resolved.startsWith(EVIDENCE_ROOT + path.sep)) {
+      return textResult(`runId 路徑跳脫 output/evidence/，已拒絕。`, true);
+    }
     const s = await stat(dir).catch(() => null);
     if (!s?.isDirectory()) return textResult(`找不到 run：${runId}（請先用 list_evidence_runs 確認名稱）`, true);
 

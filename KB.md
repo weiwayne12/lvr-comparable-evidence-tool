@@ -56,8 +56,16 @@
 
 > ⚠️ 預覽結果與官網查詢不會逐筆完全相同（資料更新時點不同），預覽僅供「篩選與討論」，最終佐證以官網截圖為準。
 
+### Open Data 預覽限制（重要）
+
+- `preview_comparables` 是 Open Data 預覽，**不是正式證據**。
+- Open Data 快取可能只涵蓋特定期別（通常為最新一季），**不一定等於完整歷史資料**。
+- `preview_comparables` 回傳的 `dataCoverage` 欄位會標示快取涵蓋的交易日期範圍；查詢期間超出快取涵蓋期間時，查無資料**不能直接解讀為「官方無交易」**。
+- 最終佐證仍以 `run_official_capture` 產出的**官網截圖與操作紀錄**為準。
+
 ### MCP 安全設計（勿繞過）
 
+- **路徑安全**：`run_official_capture(configFile)` 僅接受專案根目錄內符合 `案件設定*.json` 的檔名，不允許 `..` 路徑跳脫或絕對路徑。`read_evidence_summary(runId)` 僅接受單一資料夾名稱，不允許斜線、反斜線或 `..`，解析後必須位於 `output/evidence/` 內。
 - **強制 headless、不保留視窗**：MCP 模式以 `LVR_HEADLESS_FORCE=1` 覆蓋設定檔的 `完成後保留視窗`／`顯示瀏覽器`，避免 tool call 等人工關窗而卡死。
 - **不污染 stdout**：MCP server 本身不 `console.log`（會破壞 JSON-RPC）；子程序輸出全導向各 run 資料夾的 `_執行log.txt`。
 - **fire-and-return**：`run_official_capture` 注入 `LVR_RUN_ID` 後在背景啟動子程序，立刻回傳 runId，不同步等查詢跑完。「狀態」就是 `output/evidence/<runId>/` 資料夾本身，不另設 job queue。

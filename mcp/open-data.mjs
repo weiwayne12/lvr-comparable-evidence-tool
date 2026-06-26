@@ -204,6 +204,35 @@ export async function previewComparables(opts) {
     return { error: `找不到縣市「${city}」的 CSV（檔名 ${code}_lvr_land_a.csv），請確認快取是否完整。` };
   }
 
+  // 計算資料涵蓋期間
+  let earliestDate = null;
+  let latestDate = null;
+  for (const r of rows) {
+    const d = parseRocDate(r["交易年月日"]);
+    if (!d || isNaN(d.date.getTime())) continue;
+    if (!earliestDate || d.date < earliestDate) earliestDate = d.date;
+    if (!latestDate || d.date > latestDate) latestDate = d.date;
+  }
+  function formatRocYM(date) {
+    if (!date) return null;
+    const rocY = date.getFullYear() - 1911;
+    const m = date.getMonth() + 1;
+    return `${rocY}年${String(m).padStart(2, "0")}月`;
+  }
+  function formatISO(date) {
+    if (!date || isNaN(date.getTime())) return null;
+    return date.toISOString().slice(0, 10);
+  }
+  const dataCoverage = {
+    earliestTradeDate: earliestDate
+      ? { 民國: formatRocYM(earliestDate), 西元: formatISO(earliestDate) }
+      : null,
+    latestTradeDate: latestDate
+      ? { 民國: formatRocYM(latestDate), 西元: formatISO(latestDate) }
+      : null,
+    note: "此為目前 Open Data 快取所含資料期間；若案件起訴時點不在此期間，預覽可能查無或不完整。",
+  };
+
   // 篩選
   let filtered = rows;
 
@@ -269,7 +298,7 @@ export async function previewComparables(opts) {
   const total = filtered.length;
   const preview = filtered.slice(0, maxResults).map((r) => {
     const unitPrice = parseFloat(String(r["單價元平方公尺"] || "0").replace(/,/g, ""));
-    const unitPricePing = unitPrice > 0 ? Math.round((unitPrice * 3.305785) / 10000) : null;
+    const unitPricePing = unitPrice > 0 ? +((unitPrice * 3.305785) / 10000).toFixed(2) : null;
     const totalPrice = parseFloat(String(r["總價元"] || "0").replace(/,/g, ""));
     const totalPriceWan = totalPrice > 0 ? Math.round(totalPrice / 10000) : null;
     const area = parseFloat(String(r["建物移轉總面積平方公尺"] || "0").replace(/,/g, ""));
@@ -311,16 +340,36 @@ export async function previewComparables(opts) {
     .slice(0, 20)
     .map(([addr, count]) => ({ 門牌: addr, 筆數: count }));
 
-  return {
+  // 檢查查詢期間與資料涵蓋期間是否有交集
+  const warnings = [];
+  if (交易期間 && earliestDate && latestDate) {
+    const { 起年, 起月 = 1, 迄年, 迄月 = 12 } = 交易期間;
+    if (起年 && 迄年) {
+      const qStart = new Date(rocToAD(起年), (起月 || 1) - 1, 1);
+      const qEnd = new Date(rocToAD(迄年), (迄月 || 12), 0);
+      if (qEnd < earliestDate || qStart > latestDate) {
+        warnings.push(
+          "查詢期間與目前 Open Data 快取涵蓋期間無交集，查無資料不代表官網或歷史資料一定沒有交易。",
+          "可能只是目前快取期別不涵蓋該期間。",
+          "最終仍須以官網查詢截圖或相對應歷史 Open Data 為準。"
+        );
+      }
+    }
+  }
+
+  const result = {
     disclaimer: "此為內政部 Open Data 預覽結果，僅供篩選與討論，最終仍須以官網截圖佐證。",
     cacheInfo: {
       downloadedAt: meta.downloadedAt,
       sha256: meta.sha256,
     },
+    dataCoverage,
     query: { 縣市: city, 行政區, 門牌關鍵字, 交易期間, 交易標的, 排除房地車, 建物型態 },
     totalMatches: total,
     showing: Math.min(total, maxResults),
     topAddresses,
     results: preview,
   };
+  if (warnings.length > 0) result.warnings = warnings;
+  return result;
 }
