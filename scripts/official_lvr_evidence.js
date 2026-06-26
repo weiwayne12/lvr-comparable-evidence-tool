@@ -733,16 +733,19 @@ async function sha256(filePath) {
 
 async function main() {
   const cfg = readJson(configPath);
+  // MCP／自動化模式：強制 headless 且不保留視窗，避免 tool call 等待人工關窗而永遠卡住。
+  const forceHeadless = process.env.LVR_HEADLESS_FORCE === "1";
   // 完成後是否保留官方查詢視窗（讓使用者直接於瀏覽器檢視，不自動關閉）。
   // 開啟此選項時一律以有畫面模式啟動，否則保留視窗無意義。
-  const keepOpen = !!cfg["完成後保留視窗"];
-  const runId = `${timestamp()}_${safeName(cfg["案件名稱"])}`;
+  const keepOpen = forceHeadless ? false : !!cfg["完成後保留視窗"];
+  // 允許由外部（如 MCP）注入 runId，使呼叫端能在啟動前即得知輸出資料夾（fire-and-return）。
+  const runId = process.env.LVR_RUN_ID || `${timestamp()}_${safeName(cfg["案件名稱"])}`;
   const outputRoot = path.resolve(ROOT, cfg["輸出資料夾"] || "output/evidence");
   const outDir = path.join(outputRoot, runId);
   ensureDir(outDir);
 
   const browser = await chromium.launch({
-    headless: keepOpen ? false : !cfg["顯示瀏覽器"],
+    headless: forceHeadless ? true : (keepOpen ? false : !cfg["顯示瀏覽器"]),
     slowMo: Number(cfg["慢速操作毫秒"] || 0)
   });
 

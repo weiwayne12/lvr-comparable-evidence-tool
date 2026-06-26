@@ -12,6 +12,9 @@ output/
 __pycache__/
 *.pyc
 
+# MCP client 設定（含本機絕對路徑，不入版控）
+.mcp.json
+
 # 系統
 .DS_Store
 Thumbs.db

@@ -4,9 +4,12 @@
   "private": true,
   "description": "用官方實價查詢網站自動點選條件、截圖並擷取表格。",
   "scripts": {
-    "evidence": "node scripts/official_lvr_evidence.js 案件設定.json"
+    "evidence": "node scripts/official_lvr_evidence.js 案件設定.json",
+    "mcp": "node mcp/lvr-mcp-server.mjs"
   },
   "dependencies": {
-    "playwright": "^1.56.1"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "playwright": "^1.56.1",
+    "zod": "^3.25.76"
   }
 }

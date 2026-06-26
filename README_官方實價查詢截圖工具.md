@@ -161,6 +161,34 @@ node scripts/official_lvr_evidence.js 案件設定_某案.json
 
 實價登錄的「社區簡稱」欄位政府**經常沒有登錄**，所以直接用社區名稱（例如「亞昕首藏」）搜尋，往往查無結果，即使該社區的成交確實存在。**較可靠的作法是用門牌/巷弄搜尋**（例如該社區所在的 `民權東路二段71巷`），就能抓到同棟、同巷的成交。
 
+## MCP 工作流（給 AI 助理用）
+
+本工具另提供 MCP server，讓 Claude Code 等 AI 助理可以直接觸發查詢截圖，不需要人工敲指令。
+
+### 啟用方式
+
+1. 確認已安裝：`npm install`（會一起裝 MCP SDK 與 zod）。
+2. Claude Code 開啟本專案時，會自動偵測 `.mcp.json` 並提示核准 MCP server。
+3. 核准後，AI 就能使用以下工具：
+
+| 工具 | 用途 |
+| --- | --- |
+| `run_official_capture(configFile)` | 背景跑官網查詢截圖，立刻回傳 runId |
+| `list_evidence_runs()` | 列出歷次輸出，標示完成／執行中 |
+| `read_evidence_summary(runId)` | 讀取某次查詢的結果摘要 |
+
+### 流程
+
+1. 告訴 AI 門牌地址與起訴日 → AI 自動建好 `案件設定_某案.json`。
+2. AI 呼叫 `run_official_capture` → 背景去官網查詢截圖。
+3. AI 呼叫 `read_evidence_summary` → 看到結果摘要（含最接近比較標的、SHA-256）。
+
+### 注意
+
+- MCP 模式下瀏覽器為背景執行（headless），不會彈出視窗。
+- `.mcp.json` 內含本機絕對路徑，換電腦需修改；此檔不入版控。
+- 詳細技術說明見 `mcp/README.md` 與 `KB.md`。
+
 ## 注意
 
 官方網站若改版，欄位代號（DOM id）可能改變，屆時要調整 `scripts/official_lvr_evidence.js`。腳本內已用中文註解標出各欄位對應的 `name`／`id`（如 `ptype`、`f_type`、`avg_var`、`#p_build` 等）。
