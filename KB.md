@@ -59,8 +59,9 @@
 ### Open Data 預覽限制（重要）
 
 - `preview_comparables` 是 Open Data 預覽，**不是正式證據**。
-- Open Data 快取可能只涵蓋特定期別（通常為最新一季），**不一定等於完整歷史資料**。
-- `preview_comparables` 回傳的 `dataCoverage` 欄位會標示快取涵蓋的交易日期範圍；查詢期間超出快取涵蓋期間時，查無資料**不能直接解讀為「官方無交易」**。
+- Open Data 快取來源（`Download?...fileName=lvr_landcsv.zip`）只是**最新一期（一旬）整批檔**，僅含該旬登記的買賣案，**完全沒有歷史資料**；歷史需另抓分季檔（`DownloadSeason?season=YYYS`）。故對「核定標的價額」這類歷史案件，preview 多半查無，屬正常。
+- `preview_comparables` 回傳的 `dataCoverage.資料基準` 取自官方 `build_time.xml`，是這批資料**真正**涵蓋什麼的權威說明（如「登記日期 115/6/1–6/10」）；`earliest/latestTradeDate` 只是各筆交易日期的最早/最晚落點，會因登記時差**高估**涵蓋，勿據以判斷。
+- `coverageStatus` 欄位：`ok`（查詢期間完整落在快取內）／`partial`（部分超出）／`out_of_range`（完全無交集）。**非 `ok` 時 `totalMatches` 不完整，0 筆或筆數偏少都不得解讀為「官方無交易」**，並會在 `warnings` 最上層附白話警示。
 - 最終佐證仍以 `run_official_capture` 產出的**官網截圖與操作紀錄**為準。
 
 ### MCP 安全設計（勿繞過）

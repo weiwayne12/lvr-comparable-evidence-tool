@@ -90,6 +90,19 @@ export async function readMeta() {
   }
 }
 
+// 讀官方批次說明（cache/open-data/csv/build_time.xml 的 <lvr_time>）。
+// 這是這批資料「真正」涵蓋什麼的權威來源（例如「登記日期 115/6/1–6/10 之買賣案件」），
+// 比用各筆交易日期推出的最早/最晚值可靠——後者會因登記時差而高估涵蓋範圍。
+async function readBuildTime() {
+  try {
+    const xml = await readFile(path.join(CACHE_DIR, "csv", "build_time.xml"), "utf8");
+    const m = xml.match(/<lvr_time>([\s\S]*?)<\/lvr_time>/);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── CSV 解析（買賣資料 a_lvr_land_a.csv） ───
 
 function parseCsvLine(line) {
@@ -226,14 +239,17 @@ export async function previewComparables(opts) {
     const d = String(date.getDate()).padStart(2, "0");
     return `${y}-${m}-${d}`;
   }
+  const sourceBatch = await readBuildTime();
   const dataCoverage = {
+    資料基準: sourceBatch, // 官方批次說明（最權威），例如「登記日期 115/6/1–6/10 之買賣案件」
     earliestTradeDate: earliestDate
       ? { 民國: formatRocYM(earliestDate), 西元: formatISO(earliestDate) }
       : null,
     latestTradeDate: latestDate
       ? { 民國: formatRocYM(latestDate), 西元: formatISO(latestDate) }
       : null,
-    note: "此為目前 Open Data 快取所含資料期間；若案件起訴時點不在此期間，預覽可能查無或不完整。",
+    note: "earliest/latestTradeDate 僅為本批資料各筆交易日期的最早/最晚值，會因登記時差而高估涵蓋；" +
+      "真正涵蓋以「資料基準」為準。若案件期間不在此批內，預覽查無或不完整，須以官網截圖為準。",
   };
 
   // 篩選
@@ -344,18 +360,33 @@ export async function previewComparables(opts) {
     .slice(0, 20)
     .map(([addr, count]) => ({ 門牌: addr, 筆數: count }));
 
-  // 檢查查詢期間與資料涵蓋期間是否有交集
+  // 檢查查詢期間是否「完整落在」快取涵蓋範圍內。
+  // 只要查詢期間有一部分超出快取（完全無交集或僅部分重疊），預覽筆數就不完整，
+  // 此時「0 筆／筆數偏少」都不得解讀為官方或歷史上無交易——必須讓呼叫端一眼看到。
+  let coverageStatus = "ok"; // ok：查詢期間完整落在快取內；partial：部分超出；out_of_range：完全無交集
   const warnings = [];
   if (交易期間 && earliestDate && latestDate) {
     const { 起年, 起月 = 1, 迄年, 迄月 = 12 } = 交易期間;
     if (起年 && 迄年) {
       const qStart = new Date(rocToAD(起年), (起月 || 1) - 1, 1);
       const qEnd = new Date(rocToAD(迄年), (迄月 || 12), 0);
+      const coverFrom = formatRocYM(earliestDate);
+      const coverTo = formatRocYM(latestDate);
+      const qLabel = `${起年}/${起月 || 1}～${迄年}/${迄月 || 12}`;
+      const basis = sourceBatch ? `本機快取為單一批次（${sourceBatch}）` : "本機快取僅為單一批次";
       if (qEnd < earliestDate || qStart > latestDate) {
+        coverageStatus = "out_of_range";
         warnings.push(
-          "查詢期間與目前 Open Data 快取涵蓋期間無交集，查無資料不代表官網或歷史資料一定沒有交易。",
-          "可能只是目前快取期別不涵蓋該期間。",
-          "最終仍須以官網查詢截圖或相對應歷史 Open Data 為準。"
+          `【超出快取範圍】${basis}，與你查詢的期間（${qLabel}）完全沒有交集。`,
+          "因此這裡的「查無」純粹是快取沒有這段期間，不代表官方或歷史上沒有交易。",
+          "請改用 run_official_capture 取得正式佐證（官網查的是全量歷史）。"
+        );
+      } else if (qStart < earliestDate || qEnd > latestDate) {
+        coverageStatus = "partial";
+        warnings.push(
+          `【涵蓋不完整】${basis}；其中各筆交易日期僅落在 ${coverFrom}～${coverTo}（為落點、非完整涵蓋），比你查詢的期間（${qLabel}）窄。`,
+          "下列筆數只反映這批資料，並非完整結果；筆數偏少或為 0 都不能當作官方無交易。",
+          "正式佐證請用 run_official_capture。"
         );
       }
     }
@@ -363,6 +394,11 @@ export async function previewComparables(opts) {
 
   const result = {
     disclaimer: "此為內政部 Open Data 預覽結果，僅供篩選與討論，最終仍須以官網截圖佐證。",
+    coverageStatus, // ok / partial / out_of_range —— 非 ok 時 totalMatches 不完整，不得當作官方查無
+  };
+  // 涵蓋不足時把警示擺在最前面，避免「0 筆」被誤讀成查無
+  if (warnings.length > 0) result.warnings = warnings;
+  Object.assign(result, {
     cacheInfo: {
       downloadedAt: meta.downloadedAt,
       sha256: meta.sha256,
@@ -373,7 +409,6 @@ export async function previewComparables(opts) {
     showing: Math.min(total, maxResults),
     topAddresses,
     results: preview,
-  };
-  if (warnings.length > 0) result.warnings = warnings;
+  });
   return result;
 }
