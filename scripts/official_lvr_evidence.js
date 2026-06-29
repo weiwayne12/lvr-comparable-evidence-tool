@@ -303,17 +303,15 @@ async function clickSearch(page, frame) {
 async function waitForResults(frame, timeoutMs) {
   // 官方查詢本身要約 8~16 秒才載入，且「載入期間」頁面會短暫顯示「0 筆／無資料」，
   // 結果表「表頭」又恆在 —— 因此任何「短時間內看到空或表頭」的判斷都會誤判成 0 筆
-  // （間歇性 bug 來源）。唯一可靠訊號是：真的出現「含交易日期(民國 yyy/mm/dd)的資料列」。
-  // 故改為輪詢等待，直到出現資料列才返回；若真的查無，則等到逾時，交由後續視為 0 筆。
+  // （間歇性 bug 來源）。必須同時確認載入遮罩已消失，才可接受「資料列」或「明確查無」。
   const deadline = Date.now() + (timeoutMs || 30000);
+  let lastState = null;
   while (Date.now() < deadline) {
-    const hasDataRow = await frame.evaluate(() =>
-      [...document.querySelectorAll("table tbody tr")]
-        .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""))
-    ).catch(() => false);
-    if (hasDataRow) return;
+    lastState = await getResultState(frame);
+    if (!lastState.loading && (lastState.hasData || lastState.explicitEmpty)) return lastState;
     await frame.waitForTimeout(500);
   }
+  return lastState || await getResultState(frame);
 }
 
 async function extractRows(frame) {
@@ -411,6 +409,57 @@ async function extractAllPages(page, frame, totalExpected, hooks = {}) {
 function totalFromSummary(summary) {
   const m = normalizeDigits(summary).match(/查詢結果\s*[：:]\s*(\d+)\s*筆/);
   return m ? Number(m[1]) : null;
+}
+
+async function getResultState(frame) {
+  return frame.evaluate(() => {
+    const clean = (text) => String(text || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+    };
+    const ownText = (el) => [...el.childNodes]
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent || "")
+      .join("")
+      .trim();
+    const loading = [...document.querySelectorAll("body *")].some((el) => {
+      const text = ownText(el) || (el.children.length ? "" : clean(el.textContent));
+      return /載入中|Loading/i.test(text) && visible(el);
+    });
+    const bodyText = clean(document.body.innerText || "");
+    const rows = [...document.querySelectorAll("table tbody tr")];
+    const hasData = rows.some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""));
+    const emptyRow = rows.some((tr) => /無資料|查無符合/.test(tr.innerText || ""));
+    const resultMatch = bodyText.match(/顯示\s*\d+\s*至\s*\d+\s*筆\s*[（(]\s*查詢結果\s*[：:]\s*(\d+)\s*筆\s*[）)]/);
+    const zero = /查詢結果\s*[：:]?\s*0\s*筆|顯示\s*0\s*筆/.test(bodyText);
+    const summary = resultMatch ? resultMatch[0].replace(/\s+/g, "") : (zero ? "顯示0筆資料" : "");
+    const total = resultMatch ? Number(resultMatch[1]) : (zero ? 0 : null);
+    return {
+      loading,
+      hasData,
+      explicitEmpty: !loading && emptyRow && zero,
+      summary,
+      total
+    };
+  }).catch(() => ({ loading: false, hasData: false, explicitEmpty: false, summary: "", total: null }));
+}
+
+async function verifyResultRows(frame, rows, summaryTotal) {
+  const state = await getResultState(frame);
+  if (state.loading) {
+    return { ok: false, reason: "官方結果頁仍顯示載入中，拒絕輸出可能未完成的結果。" };
+  }
+  const total = summaryTotal != null ? summaryTotal : state.total;
+  if (total != null && rows.length !== total) {
+    return { ok: false, reason: `官方頁面摘要為 ${total} 筆，但實際擷取 ${rows.length} 筆。` };
+  }
+  if (rows.length === 0 && !state.explicitEmpty) {
+    return { ok: false, reason: "未擷取到資料列，且官方頁面未明確顯示查無資料。" };
+  }
+  return { ok: true, state };
 }
 
 // 回到第一頁（DataTables 首筆：data-dt-idx=0），座標點擊
@@ -767,23 +816,15 @@ async function main() {
 
     // 送出查詢。官方查詢偶發載入失敗（尤其短時間重複查詢遭節流）會回 0 筆，
     // 故「非明確查無」時自動重送，最多 3 次。
-    const hasData = () => frame.evaluate(() =>
-      [...document.querySelectorAll("table tbody tr")]
-        .some((tr) => /\d{2,3}\/\d{1,2}\/\d{1,2}/.test(tr.innerText || ""))).catch(() => false);
-    const isExplicitEmpty = () => frame.evaluate(() => {
-      const emptyRow = [...document.querySelectorAll("table tbody tr")].some((tr) => /無資料|查無符合/.test(tr.innerText || ""));
-      const zero = /查詢結果\s*[：:]?\s*0\s*筆|顯示\s*0\s*筆/.test(document.body.innerText || "");
-      return emptyRow && zero;
-    }).catch(() => false);
-
     let searchOk = false;
+    let resultState = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       await clickSearch(page, frame);
       await page.waitForTimeout(Number(cfg["查詢後等待毫秒"] || 8000));
-      await waitForResults(frame, 30000).catch(() => {});
-      if (await hasData() || await isExplicitEmpty()) { searchOk = true; break; }
+      resultState = await waitForResults(frame, 30000);
+      if (!resultState.loading && (resultState.hasData || resultState.explicitEmpty)) { searchOk = true; break; }
       if (attempt < 3) {
-        console.log(`查詢回 0 筆，重試（第 ${attempt + 1} 次）…`);
+        console.log(`查詢結果尚未穩定，重試（第 ${attempt + 1} 次）…`);
         await page.waitForTimeout(2000);
       }
     }
@@ -796,8 +837,8 @@ async function main() {
 
     const resultShot = path.join(outDir, "002_官方查詢結果第1頁.png");
     await page.screenshot({ path: resultShot, fullPage: false });
-    const summary = await readResultSummary(frame);
-    const total = totalFromSummary(summary);
+    const summary = resultState?.summary || await readResultSummary(frame);
+    const total = resultState?.total ?? totalFromSummary(summary);
 
     // 逐頁擷取全部結果（結果表分頁渲染，DataTables ›）
     const fetchAll = String(cfg["擷取頁數"] || "").includes("全部") || cfg["擷取頁數"] === 0;
@@ -813,6 +854,12 @@ async function main() {
       });
     } else {
       rows = await extractRows(frame);
+    }
+
+    const verified = await verifyResultRows(frame, rows, total);
+    if (!verified.ok) {
+      await page.screenshot({ path: path.join(outDir, "擷取驗證失敗畫面.png"), fullPage: false });
+      throw new Error(`官方查詢結果擷取驗證失敗：${verified.reason} 已保存擷取驗證失敗畫面.png；請重試或人工確認官方頁面。`);
     }
 
     // 原始全部（與官方畫面一致）
