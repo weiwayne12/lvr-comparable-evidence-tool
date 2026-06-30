@@ -103,6 +103,12 @@ async function readBuildTime() {
   }
 }
 
+function isSingleSaleBatch(sourceBatch) {
+  return /登記日期\s*\d+\s*年\s*\d+\s*月\s*\d+\s*日\s*至\s*\d+\s*年\s*\d+\s*月\s*\d+\s*日之買賣案件/.test(
+    String(sourceBatch || "").replace(/\s+/g, "")
+  );
+}
+
 // ─── CSV 解析（買賣資料 a_lvr_land_a.csv） ───
 
 function parseCsvLine(line) {
@@ -360,12 +366,24 @@ export async function previewComparables(opts) {
     .slice(0, 20)
     .map(([addr, count]) => ({ 門牌: addr, 筆數: count }));
 
-  // 檢查查詢期間是否「完整落在」快取涵蓋範圍內。
-  // 只要查詢期間有一部分超出快取（完全無交集或僅部分重疊），預覽筆數就不完整，
-  // 此時「0 筆／筆數偏少」都不得解讀為官方或歷史上無交易——必須讓呼叫端一眼看到。
+  // 目前 Download?...lvr_landcsv.zip 是「最新一旬登記批次」，不是歷史交易期間快取。
+  // 交易日期 min/max 只是不完整批次中的落點，不能拿來判斷查詢期間是否完整涵蓋；
+  // 在分季歷史資料合併前，單一旬批次不得回 ok，避免 0 筆被誤讀成官方查無。
   let coverageStatus = "ok"; // ok：查詢期間完整落在快取內；partial：部分超出；out_of_range：完全無交集
   const warnings = [];
-  if (交易期間 && earliestDate && latestDate) {
+  const singleSaleBatch = !sourceBatch || isSingleSaleBatch(sourceBatch);
+  if (singleSaleBatch) {
+    coverageStatus = "partial";
+    const qLabel = 交易期間 && 交易期間.起年 && 交易期間.迄年
+      ? `${交易期間.起年}/${交易期間.起月 || 1}～${交易期間.迄年}/${交易期間.迄月 || 12}`
+      : "未限定交易期間";
+    const basis = sourceBatch ? `本機快取為最新一旬批次（${sourceBatch}）` : "本機快取為最新一旬批次";
+    warnings.push(
+      `【僅最新一旬快取】${basis}；這批資料以登記日期定義，不能保證你查詢的交易期間（${qLabel}）完整。`,
+      "earliest/latestTradeDate 只是這批資料內各筆交易日期落點，不能用來判斷涵蓋期間。",
+      "下列筆數只反映這批資料；筆數偏少或為 0 都不能當作官方無交易。正式佐證請用 run_official_capture。"
+    );
+  } else if (交易期間 && earliestDate && latestDate) {
     const { 起年, 起月 = 1, 迄年, 迄月 = 12 } = 交易期間;
     if (起年 && 迄年) {
       const qStart = new Date(rocToAD(起年), (起月 || 1) - 1, 1);
