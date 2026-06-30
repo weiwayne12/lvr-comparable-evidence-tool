@@ -447,13 +447,14 @@ async function getResultState(frame) {
   }).catch(() => ({ loading: false, hasData: false, explicitEmpty: false, summary: "", total: null }));
 }
 
-async function verifyResultRows(frame, rows, summaryTotal) {
+async function verifyResultRows(frame, rows, summaryTotal, options = {}) {
+  const requireComplete = options.requireComplete !== false;
   const state = await getResultState(frame);
   if (state.loading) {
     return { ok: false, reason: "官方結果頁仍顯示載入中，拒絕輸出可能未完成的結果。" };
   }
   const total = summaryTotal != null ? summaryTotal : state.total;
-  if (total != null && rows.length !== total) {
+  if (requireComplete && total != null && rows.length !== total) {
     return { ok: false, reason: `官方頁面摘要為 ${total} 筆，但實際擷取 ${rows.length} 筆。` };
   }
   if (rows.length === 0 && !state.explicitEmpty) {
@@ -856,7 +857,7 @@ async function main() {
       rows = await extractRows(frame);
     }
 
-    const verified = await verifyResultRows(frame, rows, total);
+    const verified = await verifyResultRows(frame, rows, total, { requireComplete: fetchAll });
     if (!verified.ok) {
       await page.screenshot({ path: path.join(outDir, "擷取驗證失敗畫面.png"), fullPage: false });
       throw new Error(`官方查詢結果擷取驗證失敗：${verified.reason} 已保存擷取驗證失敗畫面.png；請重試或人工確認官方頁面。`);
